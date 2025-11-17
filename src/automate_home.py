@@ -20,6 +20,7 @@ from _secrets import (
 )
 
 # Configure logging.
+log_to_file: bool = False
 log_formatter = logging.Formatter(
     "%(asctime)s [%(levelname)s] %(threadName)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
@@ -29,9 +30,10 @@ root_logger.setLevel(logging.INFO)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 root_logger.addHandler(console_handler)
-file_handler = logging.FileHandler("/var/log/home-automation/home-automation.log")
-file_handler.setFormatter(log_formatter)
-root_logger.addHandler(file_handler)
+if log_to_file:
+    file_handler = logging.FileHandler("/var/log/home-automation/home-automation.log")
+    file_handler.setFormatter(log_formatter)
+    root_logger.addHandler(file_handler)
 
 
 # Shared data object for thermostat and Powerwall status.
@@ -40,8 +42,7 @@ ghome = {
         "time": None,  # Update time.
         "mode": None,  # Heating or cooling, remembered for power recovery.
         "is_eco": None,  # ECO mode status.
-        "temp": None,  # Current temperature.
-        "ambient_temperature_celsius": None,
+        "ambient_temperature_celsius": None,  # Current temperature.
         "cool_celsius": None,
         "heat_celsius": None,
     },
@@ -50,7 +51,7 @@ ghome = {
     "powerwall": {
         "time": None,  # Update time.
         "on_grid": True,  # Grid connection status, assume True at start.
-        "soc": None  # State of charge.
+        "soe": None  # State of energy/charge.
     },
 }
 
@@ -150,28 +151,30 @@ def get_thermostat_status() -> dict:
         "Content-Type": "application/json"
     }
 
-    return requests.get(
-        f"https://smartdevicemanagement.googleapis.com/v1/enterprises/{PROJECT_ID}/devices/{DEVICE_ID}",
+    resp = requests.get(
+        f"https://smartdevicemanagement.googleapis.com/v1/{PROJECT_ID}/devices",
         headers=headers
-    ).json()
+    )
+    return resp.json()
 
 
-def get_grid_status() -> bool:
+def get_grid_status() -> tuple[bool,float]:
     """Checks if the system is connected to the grid via the Powerwall Dashboard."""
     try:
         # This uses the local Powerwall-Dashboard instance.
         status: bool = 'SystemConnectedToGrid' in requests.get('http://localhost:8675/alerts', timeout=5).json()
+        soe: float = requests.get('http://localhost:8675/soe', timeout=5).json()['percentage']
     except requests.exceptions.RequestException as e:
         logging.error("Could not connect to Powerwall Dashboard: %s", e)
         # Assume on grid if connection fails to avoid shutting down HVAC unnecessarily.
-        return True
-    return status
+        return True, 100.0
+    return status, soe
 
 
 def read_powerwall_status():
     """Continuously monitors Powerwall status and manages the thermostat during power outages."""
     while True:
-        on_grid = get_grid_status()
+        (on_grid, soe) = get_grid_status()
 
         with lock:
             previous_on_grid = ghome["powerwall"]["on_grid"]
@@ -180,6 +183,7 @@ def read_powerwall_status():
             original_thermostat_mode = ghome["thermostat"]["mode"]
             
             ghome["powerwall"]["on_grid"] = on_grid
+            ghome["powerwall"]["soe"] = soe
             ghome["powerwall"]["time"] = time.ctime()
 
         # Power outage scenario: Grid was on, now it's off.
@@ -232,12 +236,12 @@ def read_thermostat_status():
             hvac_status = get_thermostat_status()
             with lock:
                 ghome["thermostat"]["time"] = time.ctime()
-                traits = hvac_status.get("traits", {})
+                traits = hvac_status['devices'][0]['traits']
+                logging.info(hvac_status)
                 
                 # Update thermostat mode only if not manually turned off by this script.
                 if not ghome["is_thermostat_off"]:
-                    thermostat_mode = traits.get("sdm.devices.traits.ThermostatMode", {})
-                    ghome["thermostat"]["mode"] = thermostat_mode.get("mode")
+                    ghome["thermostat"]["mode"] = traits["sdm.devices.traits.ThermostatMode"]["mode"]
 
                 # ECO mode status.
                 eco_mode = traits.get("sdm.devices.traits.ThermostatEco", {})
@@ -246,13 +250,14 @@ def read_thermostat_status():
                 # Ambient temperature.
                 temp_trait = traits.get("sdm.devices.traits.Temperature", {})
                 ghome["thermostat"]["ambient_temperature_celsius"] = temp_trait.get("ambientTemperatureCelsius")
+                logging.info(temp_trait)
 
                 # Temperature setpoints.
                 setpoint_trait = traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint", {})
                 ghome["thermostat"]["cool_celsius"] = setpoint_trait.get("coolCelsius")
                 ghome["thermostat"]["heat_celsius"] = setpoint_trait.get("heatCelsius")
 
-            logging.info("Thermostat status updated.")
+            logging.info(f'Thermostat status updated: inside {ghome["thermostat"]["ambient_temperature_celsius"]} C.')
         except Exception as e:
             logging.error("Failed to update thermostat status: %s", e)
 
