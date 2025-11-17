@@ -82,6 +82,10 @@ You can manage the automation service using standard `systemctl` commands:
   ```bash
   sudo systemctl restart home-automation.service
   ```
+## Useful Resources
+-  [Powerwall-Dashboard](https://github.com/jasonacox/Powerwall-Dashboard) a Monitoring Dashboard for Tesla Solar and Powerwall systems using Grafana, InfluxDB, Telegraf, and pyPowerwall.
+-  [pyPowerwall](https://github.com/jasonacox/pypowerwall) a Python module to interface with Tesla Energy Gateways for Powerwall and solar power data.
+-  [python-google-nest-sdm](https://github.com/allenporter/python-google-nest-sdm)  a library for Google Device Access using the Smart Device Management API.
 
 ## Author
 Ondrej Chvala (<ochvala@gmail.com>)
