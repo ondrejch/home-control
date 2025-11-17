@@ -17,13 +17,15 @@ logging.basicConfig(
 ghome = {
     "thermostat" : {
         "mode" : None,          # heating or cooling, remember when power goes back
-        "is_eco" : None         # ECO on or off
+        "is_eco": None,         # ECO on or off
+        "temp": None
     },
+    "is_thermostat_off": None,   # this is set when HVAC is disabled
+    "last_recovered_power" : None,  # when did the power come on, wait 5 minutes before restarting HVAC
     "powerwall" : {
         "on_grid" : None,       # grid status
-    }
-    "fast_update" : None,
-    "slow_update" : None
+        "soc": None         # state of charge
+    },
 }
 
 
@@ -54,7 +56,7 @@ def set_thermostat_ECO(eco_on: bool = False):
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
-    url = f"https://smartdevicemanagement.googleapis.com/v1/{PROJECT_ID}/devices/{DEVICE_ID}:executeCommand"    
+    url = f"https://smartdevicemanagement.googleapis.com/v1/{PROJECT_ID}/devices/{DEVICE_ID}:executeCommand"
     requests.post(url, headers=headers, json={
             "command": "sdm.devices.commands.ThermostatEco.SetMode",
             "params": {
@@ -83,7 +85,7 @@ def get_grid_status() -> bool:
     return status
 
 
-def fast_updater():
+def read_powerwall_status():
     """Updates ghome every 5 seconds."""
     while True:
         with lock:
@@ -92,19 +94,53 @@ def fast_updater():
         time.sleep(5)
 
 
-def slow_updater():
+def read_thermostat_status():
     """Updates ghome every hour."""
     while True:
         with lock:
-            ghome["slow_update"] = f"Updated at {time.ctime()}"
+            """traits:
+  sdm.devices.traits.Connectivity:
+    status: ONLINE
+  sdm.devices.traits.Fan:
+    timer_mode: 'ON'
+    timer_timeout: '2025-11-17T04:00:44+00:00'
+  sdm.devices.traits.Humidity:
+    ambient_humidity_percent: 54.0
+  sdm.devices.traits.Info:
+    custom_name: Hallway Thermostat
+  sdm.devices.traits.Temperature:
+    ambient_temperature_celsius: 22.472885
+  sdm.devices.traits.ThermostatEco:
+    available_modes:
+    - 'OFF'
+    - MANUAL_ECO
+    cool_celsius: 26.666666
+    heat_celsius: 15.555555
+    mode: 'OFF'
+  sdm.devices.traits.ThermostatHvac:
+    status: 'OFF'
+  sdm.devices.traits.ThermostatMode:
+    available_modes:
+    - HEAT
+    - COOL
+    - HEATCOOL
+    - 'OFF'
+    mode: HEAT
+  sdm.devices.traits.ThermostatTemperatureSetpoint:
+    cool_celsius: null
+    heat_celsius: 18.333334
+type: sdm.devices.types.THERMOSTAT
+"""
+            hvac_status = get_thermostat_status()
+            ghome[""] = f"Updated at {time.ctime()}"
             logging.info("Slow update: %s", ghome["slow_update"])
         time.sleep(3600)  # 1 hour
 
 
 if __name__ == "__main__":
     # Create threads
-    t1 = threading.Thread(target=fast_updater, name="FastThread", daemon=True)
-    t2 = threading.Thread(target=slow_updater, name="SlowThread", daemon=True)
+    t1 = threading.Thread(target=read_powerwall_status, name="Power Wall status update", daemon=True)
+    t2 = threading.Thread(target=read_thermostat_status, name="Thermostat status update", daemon=True)
 
     # Start threads
     t1.start()
@@ -116,4 +152,3 @@ if __name__ == "__main__":
             time.sleep(1)
     except KeyboardInterrupt:
         logging.info("Exiting service...")
-
