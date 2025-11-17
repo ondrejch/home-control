@@ -47,6 +47,7 @@ ghome = {
         "heat_celsius": None,
     },
     "is_thermostat_off": False,  # Flag to indicate if the thermostat was turned off by this script.
+    "low_battery_notified": False, # Flag to track low battery notification.
     "last_recovered_power": None,  # Timestamp of power recovery to manage the 5-minute delay.
     "powerwall": {
         "time": None,  # Update time.
@@ -181,6 +182,7 @@ def read_powerwall_status():
             is_thermostat_off = ghome["is_thermostat_off"]
             last_recovered_power = ghome["last_recovered_power"]
             original_thermostat_mode = ghome["thermostat"]["mode"]
+            low_battery_notified = ghome["low_battery_notified"]
             
             ghome["powerwall"]["on_grid"] = on_grid
             ghome["powerwall"]["soe"] = soe
@@ -201,6 +203,9 @@ def read_powerwall_status():
         # Power recovery scenario: Grid was off, now it's on.
         elif not previous_on_grid and on_grid:
             logging.info("Power has been restored.")
+            # Reset low battery notification flag on power recovery.
+            with lock:
+                ghome["low_battery_notified"] = False
             if is_thermostat_off:
                 send_email("Power Restored", "The connection to the grid has been restored. The thermostat will be turned back on in 5 minutes.")
                 with lock:
@@ -225,6 +230,13 @@ def read_powerwall_status():
                     with lock:
                         ghome["is_thermostat_off"] = False
                         ghome["last_recovered_power"] = None
+        
+        # Low battery warning during an outage.
+        if not on_grid and soe < 10 and not low_battery_notified:
+            logging.warning(f"Powerwall state of energy is critically low at {soe}%.")
+            send_email("Critical Alert: Powerwall Battery Low", f"The Powerwall state of energy is critically low at {soe}%.")
+            with lock:
+                ghome["low_battery_notified"] = True
 
         time.sleep(5)
 
@@ -236,30 +248,32 @@ def read_thermostat_status():
             hvac_status = get_thermostat_status()
             with lock:
                 ghome["thermostat"]["time"] = time.ctime()
+                # Assuming the first device in the list is the one we want.
                 traits = hvac_status['devices'][0]['traits']
-                logging.info(hvac_status)
-                
+
                 # Update thermostat mode only if not manually turned off by this script.
                 if not ghome["is_thermostat_off"]:
                     ghome["thermostat"]["mode"] = traits["sdm.devices.traits.ThermostatMode"]["mode"]
 
                 # ECO mode status.
-                eco_mode = traits.get("sdm.devices.traits.ThermostatEco", {})
-                ghome["thermostat"]["is_eco"] = eco_mode.get("mode") == "MANUAL_ECO"
+                ghome["thermostat"]["is_eco"] = traits["sdm.devices.traits.ThermostatEco"]["mode"] == "MANUAL_ECO"
 
                 # Ambient temperature.
-                temp_trait = traits.get("sdm.devices.traits.Temperature", {})
-                ghome["thermostat"]["ambient_temperature_celsius"] = temp_trait.get("ambientTemperatureCelsius")
-                logging.info(temp_trait)
+                ghome["thermostat"]["ambient_temperature_celsius"] = traits["sdm.devices.traits.Temperature"][
+                    "ambientTemperatureCelsius"]
 
                 # Temperature setpoints.
-                setpoint_trait = traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint", {})
-                ghome["thermostat"]["cool_celsius"] = setpoint_trait.get("coolCelsius")
-                ghome["thermostat"]["heat_celsius"] = setpoint_trait.get("heatCelsius")
+                ghome["thermostat"]["cool_celsius"] = traits["sdm.devices.traits.ThermostatTemperatureSetpoint"].get(
+                    "coolCelsius")
+                ghome["thermostat"]["heat_celsius"] = traits["sdm.devices.traits.ThermostatTemperatureSetpoint"].get(
+                    "heatCelsius")
 
-            logging.info(f'Thermostat status updated: inside {ghome["thermostat"]["ambient_temperature_celsius"]} C.')
+            logging.info(
+                f'Thermostat status updated: inside {ghome["thermostat"]["ambient_temperature_celsius"]:.1f} C.')
+        except (KeyError, IndexError) as e:
+            logging.error(f"Failed to parse thermostat status due to unexpected structure: {e}")
         except Exception as e:
-            logging.error("Failed to update thermostat status: %s", e)
+            logging.error(f"Failed to update thermostat status: {e}")
 
         # Wait for 1 hour before the next update.
         time.sleep(3600)
