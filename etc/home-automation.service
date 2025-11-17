@@ -1,0 +1,25 @@
+[Unit]
+Description=Home Automation Service for Powerwall and Thermostat
+After=network.target
+
+[Service]
+# Execute the script using the system's python3 interpreter
+ExecStart=/usr/bin/python3 /usr/local/sbin/automate_home.py
+
+# The working directory needs to see _secrets.py
+WorkingDirectory=/etc/home-automation
+
+# Run the service as a dedicated user for better security
+User=homeauto
+Group=homeauto
+
+# Standard output and error will be sent to journald
+StandardOutput=journal
+StandardError=journal
+
+# Restart the service if it fails
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
