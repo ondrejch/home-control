@@ -7,9 +7,12 @@ import time
 import logging
 import requests
 import smtplib
+import sys
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+# Add the configuration directory to the Python path to find _secrets.py.
+sys.path.insert(0, '/etc/home-automation')
 # Import secrets, including the new email list.
 from _secrets import (
     CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN, PROJECT_ID, DEVICE_ID,
@@ -26,7 +29,7 @@ root_logger.setLevel(logging.INFO)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 root_logger.addHandler(console_handler)
-file_handler = logging.FileHandler("automate_home.log")
+file_handler = logging.FileHandler("/var/log/home-automation/home-automation.log")
 file_handler.setFormatter(log_formatter)
 root_logger.addHandler(file_handler)
 
