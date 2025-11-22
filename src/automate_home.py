@@ -10,6 +10,7 @@ import smtplib
 import sys
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import http.client, urllib
 
 # Add the configuration directory to the Python path to find _secrets.py.
 sys.path.insert(0, '/etc/home-automation')
@@ -58,6 +59,17 @@ ghome = {
 
 # Lock for thread-safe access to the shared ghome object.
 lock = threading.Lock()
+
+
+def send_pushover(message: str):
+    """ Sends a Pushover message, https://pushover.net """
+    conn.request("POST", "/1/messages.json", 
+                 urllib.parse.urlencode({ "token": PUSHOVER_APP_TOKEN, 
+                                         "user": PUSHOVER_USERGROUP, 
+                                         "message": message }),
+                 { "Content-type": "application/x-www-form-urlencoded" }
+                 )
+    conn.getresponse()
 
 
 def send_email(subject, body):
@@ -192,6 +204,8 @@ def read_powerwall_status():
         if previous_on_grid and not on_grid and not is_thermostat_off:
             logging.warning("Power outage detected! Turning off thermostat to conserve energy.")
             send_email("Power Outage Detected", "The connection to the grid was lost. The thermostat has been turned off to conserve energy.")
+            if PUSHOVER_APP_TOKEN:
+                send_pushover("Grid OFF")
             try:
                 set_thermostat_mode('OFF')
                 with lock:
@@ -208,6 +222,7 @@ def read_powerwall_status():
                 ghome["low_battery_notified"] = False
             if is_thermostat_off:
                 send_email("Power Restored", "The connection to the grid has been restored. The thermostat will be turned back on in 5 minutes.")
+                send_pushover("Grid back ON")
                 with lock:
                     ghome["last_recovered_power"] = time.time()
         
