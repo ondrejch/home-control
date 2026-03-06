@@ -51,7 +51,7 @@ The repository includes:
 
 - `src/dht_exporter.py` (reads DHT22 and optional GMC-300 radiation CPM)
 - `etc/dht_exporter.service`
-- `etc/dht_exporter.timer` (runs every 30 seconds)
+- `etc/dht_exporter.timer` (runs every 30 seconds, with `Persistent=true`)
 
 ### Exporter dependencies
 
@@ -78,6 +78,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now dht_exporter.timer
 ```
 
+The service runs as `node_exporter` user (`SupplementaryGroups=dialout gpio` for USB serial and GPIO access).
+
 ### Exporter status/logs
 
 ```bash
@@ -92,6 +94,34 @@ The exporter writes metrics to:
 For Pushover alerts from `dht_exporter.py`, provide:
 `/etc/home-automation/_secrets_pushover.py` with `PUSHOVER_APP_TOKEN` and
 `PUSHOVER_USERGROUP`.
+
+### Exporter configuration via environment
+
+Supported environment variables:
+
+- `DHT_MODEL` (`DHT22` default, `DHT11` supported)
+- `DHT_PIN` (`D4` default)
+- `GMC_PORTS` (comma-separated serial ports; default `/dev/ttyUSB0`)
+- `RADIATION_ALERT_CPM` (default `100`)
+- `RADIATION_ALERT_COOLDOWN_SECONDS` (default `1800`)
+- `RADIATION_ALERT_STATE_FILE` (default `/var/lib/node_exporter/textfile_collector/.radiation_alert_ts`)
+
+Example `systemd` override:
+
+```bash
+sudo systemctl edit dht_exporter.service
+```
+
+Add:
+
+```ini
+[Service]
+Environment="DHT_MODEL=DHT22"
+Environment="DHT_PIN=D4"
+Environment="GMC_PORTS=/dev/ttyUSB0,/dev/ttyUSB1"
+Environment="RADIATION_ALERT_CPM=100"
+Environment="RADIATION_ALERT_COOLDOWN_SECONDS=3600"
+```
 
 ## Secrets Notes
 

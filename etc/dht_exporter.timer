@@ -5,7 +5,7 @@ Description=Run DHT exporter periodically
 OnBootSec=30s
 OnUnitActiveSec=30s
 Unit=dht_exporter.service
+Persistent=true
 
 [Install]
 WantedBy=multi-user.target
-

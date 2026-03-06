@@ -4,5 +4,7 @@ Description=Read DHT sensor and write Prometheus textfile metrics
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/env python3 /usr/local/bin/dht_exporter.py
-User=root
-
+User=node_exporter
+Group=node_exporter
+# Needed for USB serial (GMC) and GPIO (DHT) access on most Linux hosts.
+SupplementaryGroups=dialout gpio
