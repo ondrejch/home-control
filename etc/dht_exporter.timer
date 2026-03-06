@@ -1,0 +1,11 @@
+[Unit]
+Description=Run DHT exporter periodically
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+Unit=dht_exporter.service
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,8 @@
+[Unit]
+Description=Read DHT sensor and write Prometheus textfile metrics
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env python3 /usr/local/bin/dht_exporter.py
+User=root
+

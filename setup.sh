@@ -2,6 +2,7 @@
 
 # This script installs the home automation service.
 # It must be run with root privileges.
+set -euo pipefail
 
 # 1. Check for root privileges
 if [ "$EUID" -ne 0 ]; then
@@ -10,6 +11,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo "Starting home automation service setup..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 2. Define user and directories
 SERVICE_USER="homeauto"
@@ -34,8 +36,8 @@ chown -R "$SERVICE_USER":"$SERVICE_USER" "$LOG_DIR"
 
 # 5. Copy application and configuration files
 echo "Copying application and service files..."
-cp src/automate_home.py "$SCRIPT_DEST"
-cp etc/home-automation.service "$SERVICE_FILE"
+cp "$SCRIPT_DIR/src/automate_home.py" "$SCRIPT_DEST"
+cp "$SCRIPT_DIR/etc/home-automation.service" "$SERVICE_FILE"
 
 # Make the script executable
 chmod +x "$SCRIPT_DEST"
@@ -46,7 +48,7 @@ if [ -f "$SECRETS_FILE" ]; then
     echo "Secrets file already exists at $SECRETS_FILE. Skipping template copy."
 else
     echo "Copying _secrets.py.template to $SECRETS_FILE."
-    cp src/_secrets.py.template "$SECRETS_FILE"
+    cp "$SCRIPT_DIR/src/_secrets.py.template" "$SECRETS_FILE"
     chown "$SERVICE_USER":"$SERVICE_USER" "$SECRETS_FILE"
     chmod 600 "$SECRETS_FILE" # Restrict access to the owner
     echo "IMPORTANT: Please edit $SECRETS_FILE now and fill in your credentials."
@@ -68,4 +70,3 @@ echo "To view logs, run: sudo journalctl -u home-automation.service -f"
 echo "-----------------------------------------------------"
 
 exit 0
-
