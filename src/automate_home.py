@@ -30,6 +30,10 @@ POWERWALL_POLL_SECONDS = 5
 THERMOSTAT_POLL_SECONDS = 3600
 POWER_RECOVERY_DELAY_SECONDS = 300
 LOW_BATTERY_THRESHOLD_PERCENT = 10.0
+SOLAR_EXCESS_THRESHOLD_PERCENT = 95.0
+SOLAR_EXCESS_TARGET_FAHRENHEIT = 70.0
+SOLAR_RESTORE_HOUR = 16
+HEATCOOL_SOLAR_RANGE_FAHRENHEIT = (69.0, 71.0)
 VALID_HVAC_MODES = {"HEAT", "COOL", "HEATCOOL", "OFF"}
 
 
@@ -107,6 +111,15 @@ def _initial_state() -> Dict[str, Any]:
         "is_thermostat_off": False,
         "low_battery_notified": False,
         "last_recovered_power": None,
+        "solar_excess_override": {
+            "active": False,
+            "triggered_at": None,
+            "original_mode": None,
+            "original_heat_celsius": None,
+            "original_cool_celsius": None,
+            "override_heat_celsius": None,
+            "override_cool_celsius": None,
+        },
         "powerwall": {
             "time": None,
             # Keep current fail-safe behavior: assume on-grid at startup.
@@ -139,7 +152,7 @@ def _enterprise_name() -> str:
 
 
 def _device_name() -> str:
-    """Return full SDM device resource path.
+    """Return the full SDM device resource path.
 
     Returns:
         Device resource in the form `enterprises/<id>/devices/<device-id>`.
@@ -255,7 +268,7 @@ def get_access_token() -> str:
         OAuth access token string.
 
     Raises:
-        RuntimeError: If token is missing in response.
+        RuntimeError: If a token is missing in response.
         requests.RequestException: If network/API call fails.
         ValueError: If response JSON is malformed.
     """
@@ -330,6 +343,81 @@ def set_thermostat_eco(eco_on: bool = False) -> None:
 def set_thermostat_ECO(eco_on: bool = False) -> None:
     """Backward-compatible alias for `set_thermostat_eco`."""
     set_thermostat_eco(eco_on=eco_on)
+
+
+def _fahrenheit_to_celsius(degrees_fahrenheit: float) -> float:
+    """Convert Fahrenheit to Celsius rounded for SDM setpoint payloads."""
+    return round((degrees_fahrenheit - 32.0) * 5.0 / 9.0, 1)
+
+
+def _is_before_solar_cutoff(now: float) -> bool:
+    """Return True when local time is before the configured solar cutoff hour."""
+    return time.localtime(now).tm_hour < SOLAR_RESTORE_HOUR
+
+
+def _is_after_solar_cutoff(now: float) -> bool:
+    """Return True when local time is at or after the configured solar cutoff hour."""
+    return not _is_before_solar_cutoff(now)
+
+
+def _solar_override_targets(mode: str) -> Tuple[Optional[float], Optional[float]]:
+    """Return temporary setpoints for the excess-solar thermostat override."""
+    if mode == "HEAT":
+        return _fahrenheit_to_celsius(SOLAR_EXCESS_TARGET_FAHRENHEIT), None
+    if mode == "COOL":
+        return None, _fahrenheit_to_celsius(SOLAR_EXCESS_TARGET_FAHRENHEIT)
+    if mode == "HEATCOOL":
+        return (
+            _fahrenheit_to_celsius(HEATCOOL_SOLAR_RANGE_FAHRENHEIT[0]),
+            _fahrenheit_to_celsius(HEATCOOL_SOLAR_RANGE_FAHRENHEIT[1]),
+        )
+    raise ValueError(f"Unsupported thermostat mode '{mode}' for solar override.")
+
+
+def set_thermostat_setpoint(
+    mode: str,
+    *,
+    heat_celsius: Optional[float] = None,
+    cool_celsius: Optional[float] = None,
+) -> None:
+    """Set thermostat temperature setpoint(s) for the current HVAC mode.
+
+    Args:
+        mode: Current thermostat mode, one of `HEAT`, `COOL`, or `HEATCOOL`.
+        heat_celsius: Target heating setpoint when mode requires it.
+        cool_celsius: Target cooling setpoint when mode requires it.
+
+    Raises:
+        ValueError: If the mode/setpoint combination is invalid.
+        requests.RequestException: If the SDM API request fails.
+    """
+    if mode == "HEAT":
+        if heat_celsius is None or cool_celsius is not None:
+            raise ValueError("HEAT mode requires only heat_celsius.")
+        command = "sdm.devices.commands.ThermostatTemperatureSetpoint.SetHeat"
+        params = {"heatCelsius": heat_celsius}
+    elif mode == "COOL":
+        if cool_celsius is None or heat_celsius is not None:
+            raise ValueError("COOL mode requires only cool_celsius.")
+        command = "sdm.devices.commands.ThermostatTemperatureSetpoint.SetCool"
+        params = {"coolCelsius": cool_celsius}
+    elif mode == "HEATCOOL":
+        if heat_celsius is None or cool_celsius is None:
+            raise ValueError("HEATCOOL mode requires both heat_celsius and cool_celsius.")
+        if cool_celsius <= heat_celsius:
+            raise ValueError("HEATCOOL mode requires cool_celsius to be greater than heat_celsius.")
+        command = "sdm.devices.commands.ThermostatTemperatureSetpoint.SetRange"
+        params = {"heatCelsius": heat_celsius, "coolCelsius": cool_celsius}
+    else:
+        raise ValueError(f"Unsupported thermostat mode '{mode}' for setpoint changes.")
+
+    access_token = get_access_token()
+    _request_json(
+        "POST",
+        f"{GOOGLE_SDM_BASE_URL}/{_device_name()}:executeCommand",
+        headers=_sdm_headers(access_token),
+        json_payload={"command": command, "params": params},
+    )
 
 
 def get_thermostat_status() -> Dict[str, Any]:
@@ -470,6 +558,8 @@ def process_powerwall_state(on_grid: bool, soe: float, now: Optional[float] = No
         with lock:
             ghome["low_battery_notified"] = True
 
+    _process_solar_excess_logic(on_grid=on_grid, soe=soe, now=now)
+
 
 def read_powerwall_status() -> None:
     """Continuously monitor Powerwall state and drive outage control logic."""
@@ -510,28 +600,174 @@ def _select_device_traits(hvac_status: Dict[str, Any]) -> Dict[str, Any]:
     return selected_device["traits"]
 
 
+def refresh_thermostat_status(now: Optional[float] = None) -> Dict[str, Any]:
+    """Fetch thermostat traits once and update the shared status cache."""
+    if now is None:
+        now = time.time()
+
+    hvac_status = get_thermostat_status()
+    traits = _select_device_traits(hvac_status)
+    setpoints = traits["sdm.devices.traits.ThermostatTemperatureSetpoint"]
+    snapshot = {
+        "time": time.ctime(now),
+        "mode": traits["sdm.devices.traits.ThermostatMode"]["mode"],
+        "is_eco": traits["sdm.devices.traits.ThermostatEco"]["mode"] == "MANUAL_ECO",
+        "ambient_temperature_celsius": traits["sdm.devices.traits.Temperature"][
+            "ambientTemperatureCelsius"
+        ],
+        "cool_celsius": setpoints.get("coolCelsius"),
+        "heat_celsius": setpoints.get("heatCelsius"),
+    }
+
+    with lock:
+        ghome["thermostat"]["time"] = snapshot["time"]
+        if not ghome["is_thermostat_off"]:
+            ghome["thermostat"]["mode"] = snapshot["mode"]
+        ghome["thermostat"]["is_eco"] = snapshot["is_eco"]
+        ghome["thermostat"]["ambient_temperature_celsius"] = snapshot["ambient_temperature_celsius"]
+        ghome["thermostat"]["cool_celsius"] = snapshot["cool_celsius"]
+        ghome["thermostat"]["heat_celsius"] = snapshot["heat_celsius"]
+
+    return snapshot
+
+
+def _clear_solar_excess_override() -> None:
+    """Reset the temporary excess-solar thermostat override state."""
+    with lock:
+        ghome["solar_excess_override"].update(
+            {
+                "active": False,
+                "triggered_at": None,
+                "original_mode": None,
+                "original_heat_celsius": None,
+                "original_cool_celsius": None,
+                "override_heat_celsius": None,
+                "override_cool_celsius": None,
+            }
+        )
+
+
+def _trigger_solar_excess_override(now: float, soe: float) -> None:
+    """Temporarily lower/raise setpoints to use excess solar generation."""
+    snapshot = refresh_thermostat_status(now=now)
+    mode = snapshot["mode"]
+    if snapshot["is_eco"]:
+        logging.info("Skipping excess-solar thermostat override because ECO mode is enabled.")
+        return
+    if mode not in {"HEAT", "COOL", "HEATCOOL"}:
+        logging.info("Skipping excess-solar thermostat override because mode is '%s'.", mode)
+        return
+
+    override_heat_celsius, override_cool_celsius = _solar_override_targets(mode)
+    original_heat_celsius = snapshot["heat_celsius"]
+    original_cool_celsius = snapshot["cool_celsius"]
+
+    if mode == "HEAT" and original_heat_celsius is None:
+        logging.warning("Skipping excess-solar thermostat override because heat setpoint is unavailable.")
+        return
+    if mode == "COOL" and original_cool_celsius is None:
+        logging.warning("Skipping excess-solar thermostat override because cool setpoint is unavailable.")
+        return
+    if mode == "HEATCOOL" and (original_heat_celsius is None or original_cool_celsius is None):
+        logging.warning("Skipping excess-solar thermostat override because range setpoints are unavailable.")
+        return
+
+    set_thermostat_setpoint(
+        mode,
+        heat_celsius=override_heat_celsius,
+        cool_celsius=override_cool_celsius,
+    )
+    with lock:
+        ghome["solar_excess_override"].update(
+            {
+                "active": True,
+                "triggered_at": now,
+                "original_mode": mode,
+                "original_heat_celsius": original_heat_celsius,
+                "original_cool_celsius": original_cool_celsius,
+                "override_heat_celsius": override_heat_celsius,
+                "override_cool_celsius": override_cool_celsius,
+            }
+        )
+    logging.info(
+        "Applied excess-solar thermostat override at %.1f%% battery charge while in %s mode.",
+        soe,
+        mode,
+    )
+
+
+def _restore_solar_excess_override(now: float) -> None:
+    """Restore thermostat setpoints after the excess-solar window closes."""
+    snapshot = refresh_thermostat_status(now=now)
+    with lock:
+        override_state = dict(ghome["solar_excess_override"])
+
+    if not override_state["active"]:
+        return
+
+    current_mode = snapshot["mode"]
+    if snapshot["is_eco"]:
+        logging.info("Clearing excess-solar thermostat override because ECO mode is enabled.")
+        _clear_solar_excess_override()
+        return
+    if current_mode != override_state["original_mode"]:
+        logging.info(
+            "Clearing excess-solar thermostat override because mode changed from %s to %s.",
+            override_state["original_mode"],
+            current_mode,
+        )
+        _clear_solar_excess_override()
+        return
+
+    if (
+        snapshot["heat_celsius"] != override_state["override_heat_celsius"]
+        or snapshot["cool_celsius"] != override_state["override_cool_celsius"]
+    ):
+        logging.info("Clearing excess-solar thermostat override because setpoints changed externally.")
+        _clear_solar_excess_override()
+        return
+
+    set_thermostat_setpoint(
+        override_state["original_mode"],
+        heat_celsius=override_state["original_heat_celsius"],
+        cool_celsius=override_state["original_cool_celsius"],
+    )
+    _clear_solar_excess_override()
+    logging.info("Restored thermostat setpoints after the 4:00pm solar-use window.")
+
+
+def _process_solar_excess_logic(on_grid: bool, soe: float, now: float) -> None:
+    """Apply and later restore the temporary excess-solar thermostat override."""
+    with lock:
+        override_active = ghome["solar_excess_override"]["active"]
+        is_thermostat_off = ghome["is_thermostat_off"]
+
+    if override_active and _is_after_solar_cutoff(now):
+        if not on_grid or is_thermostat_off:
+            return
+        try:
+            _restore_solar_excess_override(now=now)
+        except Exception as exc:
+            logging.error("Failed to restore excess-solar thermostat override: %s", exc)
+        return
+
+    if override_active or not on_grid or is_thermostat_off:
+        return
+    if soe <= SOLAR_EXCESS_THRESHOLD_PERCENT or not _is_before_solar_cutoff(now):
+        return
+
+    try:
+        _trigger_solar_excess_override(now=now, soe=soe)
+    except Exception as exc:
+        logging.error("Failed to apply excess-solar thermostat override: %s", exc)
+
+
 def read_thermostat_status() -> None:
     """Refresh thermostat status fields on a fixed polling interval."""
     while True:
         try:
-            hvac_status = get_thermostat_status()
-            traits = _select_device_traits(hvac_status)
-            with lock:
-                ghome["thermostat"]["time"] = time.ctime()
-                if not ghome["is_thermostat_off"]:
-                    ghome["thermostat"]["mode"] = traits["sdm.devices.traits.ThermostatMode"]["mode"]
-
-                ghome["thermostat"]["is_eco"] = (
-                    traits["sdm.devices.traits.ThermostatEco"]["mode"] == "MANUAL_ECO"
-                )
-                ghome["thermostat"]["ambient_temperature_celsius"] = traits[
-                    "sdm.devices.traits.Temperature"
-                ]["ambientTemperatureCelsius"]
-                setpoints = traits["sdm.devices.traits.ThermostatTemperatureSetpoint"]
-                ghome["thermostat"]["cool_celsius"] = setpoints.get("coolCelsius")
-                ghome["thermostat"]["heat_celsius"] = setpoints.get("heatCelsius")
-
-                ambient_temp = ghome["thermostat"]["ambient_temperature_celsius"]
+            snapshot = refresh_thermostat_status()
+            ambient_temp = snapshot["ambient_temperature_celsius"]
             logging.info("Thermostat status updated: inside %.1f C.", ambient_temp)
         except (KeyError, IndexError, TypeError) as exc:
             logging.error("Failed to parse thermostat status due to unexpected payload: %s", exc)

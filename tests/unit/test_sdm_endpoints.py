@@ -46,3 +46,37 @@ def test_set_thermostat_mode_rejects_invalid_mode():
     """Invalid HVAC mode values should raise ValueError explicitly."""
     with pytest.raises(ValueError, match="Invalid hvac_mode"):
         automate_home.set_thermostat_mode("BADMODE")
+
+
+def test_set_thermostat_setpoint_uses_heat_command(monkeypatch):
+    """Heat setpoint changes should target the SDM SetHeat command."""
+    monkeypatch.setattr(automate_home, "PROJECT_ID", "123456789")
+    monkeypatch.setattr(automate_home, "DEVICE_ID", "device-123")
+    monkeypatch.setattr(automate_home, "get_access_token", lambda: "token")
+
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = kwargs["json_payload"]
+        return {}
+
+    monkeypatch.setattr(automate_home, "_request_json", fake_request)
+    automate_home.set_thermostat_setpoint("HEAT", heat_celsius=21.1)
+
+    assert captured["method"] == "POST"
+    assert (
+        captured["url"]
+        == "https://smartdevicemanagement.googleapis.com/v1/enterprises/123456789/devices/device-123:executeCommand"
+    )
+    assert captured["payload"] == {
+        "command": "sdm.devices.commands.ThermostatTemperatureSetpoint.SetHeat",
+        "params": {"heatCelsius": 21.1},
+    }
+
+
+def test_set_thermostat_setpoint_rejects_invalid_range():
+    """HEATCOOL range commands should require cool > heat."""
+    with pytest.raises(ValueError, match="cool_celsius to be greater"):
+        automate_home.set_thermostat_setpoint("HEATCOOL", heat_celsius=21.0, cool_celsius=21.0)
