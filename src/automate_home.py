@@ -31,6 +31,7 @@ THERMOSTAT_POLL_SECONDS = 3600
 POWER_RECOVERY_DELAY_SECONDS = 300
 LOW_BATTERY_THRESHOLD_PERCENT = 10.0
 SOLAR_EXCESS_THRESHOLD_PERCENT = 96.0
+SOLAR_RESTORE_THRESHOLD_PERCENT = 85.0
 SOLAR_EXCESS_TARGET_FAHRENHEIT = 68.0
 SOLAR_RESTORE_HOUR = 16
 HEATCOOL_SOLAR_RANGE_FAHRENHEIT = (65.0, 68.0)
@@ -734,7 +735,7 @@ def _restore_solar_excess_override(now: float) -> None:
         cool_celsius=override_state["original_cool_celsius"],
     )
     _clear_solar_excess_override()
-    logging.info("Restored thermostat setpoints after the 4:00pm solar-use window.")
+    logging.info("Restored thermostat setpoints after the solar-use override ended.")
 
 
 def _process_solar_excess_logic(on_grid: bool, soe: float, now: float) -> None:
@@ -743,7 +744,12 @@ def _process_solar_excess_logic(on_grid: bool, soe: float, now: float) -> None:
         override_active = ghome["solar_excess_override"]["active"]
         is_thermostat_off = ghome["is_thermostat_off"]
 
-    if override_active and _is_after_solar_cutoff(now):
+    should_restore_override = (
+        override_active
+        and (_is_after_solar_cutoff(now) or soe < SOLAR_RESTORE_THRESHOLD_PERCENT)
+    )
+
+    if should_restore_override:
         if not on_grid or is_thermostat_off:
             return
         try:

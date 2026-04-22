@@ -72,8 +72,8 @@ def test_low_battery_threshold_is_strictly_less_than_10(monkeypatch):
     assert "Critical Alert: Powerwall Battery Low" not in sent_subjects
 
 
-def test_excess_solar_override_sets_70f_before_4pm(monkeypatch):
-    """High SoE before 4pm should temporarily apply the solar-use setpoint."""
+def test_excess_solar_override_sets_configured_target_before_4pm(monkeypatch):
+    """High SoE before 4pm should temporarily apply the configured solar-use setpoint."""
     setpoint_calls = []
     monkeypatch.setattr(automate_home, "send_email", lambda *args, **kwargs: None)
     monkeypatch.setattr(automate_home, "send_pushover", lambda *args, **kwargs: None)
@@ -98,12 +98,28 @@ def test_excess_solar_override_sets_70f_before_4pm(monkeypatch):
         lambda mode, **kwargs: setpoint_calls.append((mode, kwargs)),
     )
 
-    automate_home.process_powerwall_state(on_grid=True, soe=96.0, now=1000.0)
+    automate_home.process_powerwall_state(
+        on_grid=True,
+        soe=automate_home.SOLAR_EXCESS_THRESHOLD_PERCENT + 0.1,
+        now=1000.0,
+    )
 
-    assert setpoint_calls == [("COOL", {"heat_celsius": None, "cool_celsius": 21.1})]
+    assert setpoint_calls == [
+        (
+            "COOL",
+            {
+                "heat_celsius": None,
+                "cool_celsius": automate_home._fahrenheit_to_celsius(
+                    automate_home.SOLAR_EXCESS_TARGET_FAHRENHEIT
+                ),
+            },
+        )
+    ]
     assert automate_home.ghome["solar_excess_override"]["active"] is True
     assert automate_home.ghome["solar_excess_override"]["original_cool_celsius"] == 24.4
-    assert automate_home.ghome["solar_excess_override"]["override_cool_celsius"] == 21.1
+    assert automate_home.ghome["solar_excess_override"]["override_cool_celsius"] == (
+        automate_home._fahrenheit_to_celsius(automate_home.SOLAR_EXCESS_TARGET_FAHRENHEIT)
+    )
 
 
 def test_excess_solar_override_restores_original_setpoint_after_4pm(monkeypatch):
@@ -148,4 +164,49 @@ def test_excess_solar_override_restores_original_setpoint_after_4pm(monkeypatch)
     automate_home.process_powerwall_state(on_grid=True, soe=80.0, now=1700.0)
 
     assert setpoint_calls == [("HEAT", {"heat_celsius": 19.0, "cool_celsius": None})]
+    assert automate_home.ghome["solar_excess_override"]["active"] is False
+
+
+def test_excess_solar_override_restores_when_battery_drops_below_85(monkeypatch):
+    """An active solar override should restore once battery charge drops below 85%."""
+    setpoint_calls = []
+    monkeypatch.setattr(automate_home, "send_email", lambda *args, **kwargs: None)
+    monkeypatch.setattr(automate_home, "send_pushover", lambda *args, **kwargs: None)
+    monkeypatch.setattr(automate_home, "set_thermostat_mode", lambda *args, **kwargs: None)
+    monkeypatch.setattr(automate_home, "_is_before_solar_cutoff", lambda now: True)
+    monkeypatch.setattr(automate_home, "_is_after_solar_cutoff", lambda now: False)
+    monkeypatch.setattr(
+        automate_home,
+        "refresh_thermostat_status",
+        lambda now=None: {
+            "time": "now",
+            "mode": "COOL",
+            "is_eco": False,
+            "ambient_temperature_celsius": 22.0,
+            "cool_celsius": 20.0,
+            "heat_celsius": None,
+        },
+    )
+    monkeypatch.setattr(
+        automate_home,
+        "set_thermostat_setpoint",
+        lambda mode, **kwargs: setpoint_calls.append((mode, kwargs)),
+    )
+
+    with automate_home.lock:
+        automate_home.ghome["solar_excess_override"].update(
+            {
+                "active": True,
+                "triggered_at": 900.0,
+                "original_mode": "COOL",
+                "original_heat_celsius": None,
+                "original_cool_celsius": 24.4,
+                "override_heat_celsius": None,
+                "override_cool_celsius": 20.0,
+            }
+        )
+
+    automate_home.process_powerwall_state(on_grid=True, soe=84.9, now=1500.0)
+
+    assert setpoint_calls == [("COOL", {"heat_celsius": None, "cool_celsius": 24.4})]
     assert automate_home.ghome["solar_excess_override"]["active"] is False
