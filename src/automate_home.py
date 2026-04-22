@@ -30,10 +30,10 @@ POWERWALL_POLL_SECONDS = 5
 THERMOSTAT_POLL_SECONDS = 3600
 POWER_RECOVERY_DELAY_SECONDS = 300
 LOW_BATTERY_THRESHOLD_PERCENT = 10.0
-SOLAR_EXCESS_THRESHOLD_PERCENT = 95.0
-SOLAR_EXCESS_TARGET_FAHRENHEIT = 70.0
+SOLAR_EXCESS_THRESHOLD_PERCENT = 96.0
+SOLAR_EXCESS_TARGET_FAHRENHEIT = 68.0
 SOLAR_RESTORE_HOUR = 16
-HEATCOOL_SOLAR_RANGE_FAHRENHEIT = (69.0, 71.0)
+HEATCOOL_SOLAR_RANGE_FAHRENHEIT = (65.0, 68.0)
 VALID_HVAC_MODES = {"HEAT", "COOL", "HEATCOOL", "OFF"}
 
 
@@ -62,7 +62,8 @@ def _configure_logging(log_to_file: bool = False) -> None:
         root_logger.addHandler(file_handler)
 
 
-_configure_logging(log_to_file=False)
+#_configure_logging(log_to_file=False)
+_configure_logging(log_to_file=True)
 
 # Add the configuration directory to the Python path to find `_secrets.py`.
 CONFIG_DIR = os.environ.get("HOME_AUTOMATION_CONFIG_DIR", "/etc/home-automation")
