@@ -136,6 +136,7 @@ ghome = _initial_state()
 
 # Lock for thread-safe access to the shared `ghome` object.
 lock = threading.Lock()
+shutdown_event = threading.Event()
 
 
 def _enterprise_name() -> str:
@@ -505,12 +506,20 @@ def process_powerwall_state(on_grid: bool, soe: float, now: Optional[float] = No
             ),
         )
         send_pushover("Grid OFF")
+        
+        # Set the flag *before* the network call to prevent the polling thread 
+        # from overwriting the saved mode with 'OFF' due to a race condition.
+        with lock:
+            ghome["is_thermostat_off"] = True
+            ghome["last_recovered_power"] = None
+            
         try:
             set_thermostat_mode("OFF")
-            with lock:
-                ghome["is_thermostat_off"] = True
-                ghome["last_recovered_power"] = None
         except Exception as exc:
+            # Rollback if the network request fails to ensure retry on next tick
+            with lock:
+                ghome["is_thermostat_off"] = False
+                ghome["powerwall"]["on_grid"] = True
             logging.error("Failed to turn off thermostat: %s", exc)
 
     elif not previous_on_grid and on_grid:
@@ -565,14 +574,14 @@ def process_powerwall_state(on_grid: bool, soe: float, now: Optional[float] = No
 
 def read_powerwall_status() -> None:
     """Continuously monitor Powerwall state and drive outage control logic."""
-    while True:
+    while not shutdown_event.is_set():
         try:
             on_grid, soe = get_grid_status()
             process_powerwall_state(on_grid=on_grid, soe=soe)
         except Exception:
             # Keep worker alive; main thread monitors worker health and can restart process.
             logging.exception("Unhandled error in powerwall worker loop.")
-        time.sleep(POWERWALL_POLL_SECONDS)
+        shutdown_event.wait(POWERWALL_POLL_SECONDS)
 
 
 def _select_device_traits(hvac_status: Dict[str, Any]) -> Dict[str, Any]:
@@ -609,7 +618,7 @@ def refresh_thermostat_status(now: Optional[float] = None) -> Dict[str, Any]:
 
     hvac_status = get_thermostat_status()
     traits = _select_device_traits(hvac_status)
-    setpoints = traits["sdm.devices.traits.ThermostatTemperatureSetpoint"]
+    setpoints = traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint", {})
     snapshot = {
         "time": time.ctime(now),
         "mode": traits["sdm.devices.traits.ThermostatMode"]["mode"],
@@ -771,7 +780,7 @@ def _process_solar_excess_logic(on_grid: bool, soe: float, now: float) -> None:
 
 def read_thermostat_status() -> None:
     """Refresh thermostat status fields on a fixed polling interval."""
-    while True:
+    while not shutdown_event.is_set():
         try:
             snapshot = refresh_thermostat_status()
             ambient_temp = snapshot["ambient_temperature_celsius"]
@@ -780,7 +789,7 @@ def read_thermostat_status() -> None:
             logging.error("Failed to parse thermostat status due to unexpected payload: %s", exc)
         except Exception as exc:
             logging.error("Failed to update thermostat status: %s", exc)
-        time.sleep(THERMOSTAT_POLL_SECONDS)
+        shutdown_event.wait(THERMOSTAT_POLL_SECONDS)
 
 
 def run_service() -> None:
@@ -789,6 +798,12 @@ def run_service() -> None:
     Exiting the process on worker death allows `systemd` to restart the service
     and avoids silent partial failure.
     """
+    required_vars = [CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN, PROJECT_ID, DEVICE_ID]
+    for var in required_vars:
+        if not var or str(var).startswith("YOUR_"):
+            logging.error("Google SDM credentials are not configured. Exiting.")
+            sys.exit(1)
+
     powerwall_worker = threading.Thread(
         target=read_powerwall_status,
         name="Powerwall and HVAC Control",
@@ -802,7 +817,7 @@ def run_service() -> None:
     powerwall_worker.start()
     thermostat_worker.start()
 
-    while True:
+    while not shutdown_event.is_set():
         if not powerwall_worker.is_alive() or not thermostat_worker.is_alive():
             logging.critical(
                 "Worker thread died (powerwall_alive=%s, thermostat_alive=%s); exiting for systemd restart.",
@@ -810,7 +825,10 @@ def run_service() -> None:
                 thermostat_worker.is_alive(),
             )
             raise SystemExit(1)
-        time.sleep(1)
+        shutdown_event.wait(1)
+
+    powerwall_worker.join(timeout=5)
+    thermostat_worker.join(timeout=5)
 
 
 if __name__ == "__main__":
@@ -818,3 +836,4 @@ if __name__ == "__main__":
         run_service()
     except KeyboardInterrupt:
         logging.info("Exiting service...")
+        shutdown_event.set()

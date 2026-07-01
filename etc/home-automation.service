@@ -3,6 +3,7 @@ Description=Home Automation Service for Powerwall and Thermostat
 After=network.target
 
 [Service]
+Type=simple
 # Execute the script using the system's python3 interpreter
 ExecStart=/usr/bin/python3 /usr/local/sbin/automate_home.py
 
@@ -16,10 +17,20 @@ Group=homeauto
 # Standard output and error will be sent to journald
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=home-automation
 
 # Restart the service if it fails
 Restart=on-failure
 RestartSec=30
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/log/home-automation /etc/home-automation
+ProtectHome=yes
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target

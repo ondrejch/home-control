@@ -25,7 +25,7 @@ if id "$SERVICE_USER" &>/dev/null; then
     echo "User $SERVICE_USER already exists. Skipping creation."
 else
     echo "Creating system user '$SERVICE_USER'..."
-    useradd --system --shell /bin/false $SERVICE_USER
+    useradd --system --shell /bin/false "$SERVICE_USER"
 fi
 
 # 4. Create directories
