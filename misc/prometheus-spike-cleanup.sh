@@ -4,9 +4,9 @@ set -euo pipefail
 PROM_URL="http://localhost:9090"
 METRIC="pigate_radiation_cpm"
 MATCH_EXPR='pigate_radiation_cpm{instance="pigate:9100",job="node_exporters"}'
-THRESHOLD="1000"
-LOOKBACK="24h"
-STEP="30s"
+THRESHOLD="500"
+LOOKBACK="48"
+STEP=""
 PAD_BEFORE="60"
 PAD_AFTER="60"
 MERGE_GAP="90"
@@ -24,7 +24,7 @@ Defaults:
   --match-expr   pigate_radiation_cpm{instance="pigate:9100",job="node_exporters"}
   --threshold    1000
   --lookback     24h
-  --step         30s
+  --step         adaptive (delta / 10000, min 1s, max 3600s)
   --pad-before   60
   --pad-after    60
   --merge-gap    90
@@ -98,7 +98,17 @@ fi
 
 END_TS=$(date +%s)
 START_TS=$((END_TS - delta))
-QUERY="${METRIC} > ${THRESHOLD}"
+
+# Adaptive step: keep total query points under 10000.
+if [[ -z "$STEP" ]]; then
+  # Prometheus expects integer seconds.
+  STEP="$(( delta / 10000 ))s"
+  # Minimum 1s, maximum 3600s (1h) for very long lookbacks.
+  STEP_VAL=$(echo "$STEP" | sed 's/s$//')
+  if (( STEP_VAL < 1 )); then STEP="1s"; fi
+  if (( STEP_VAL > 3600 )); then STEP="3600s"; fi
+fi
+QUERY="${MATCH_EXPR} > ${THRESHOLD}"
 
 echo "Prometheus: $PROM_URL"
 echo "Metric:      $METRIC"
