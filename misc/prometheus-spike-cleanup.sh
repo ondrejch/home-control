@@ -5,7 +5,7 @@ PROM_URL="http://localhost:9090"
 METRIC="pigate_radiation_cpm"
 MATCH_EXPR='pigate_radiation_cpm{instance="pigate:9100",job="node_exporters"}'
 THRESHOLD="500"
-LOOKBACK="48"
+LOOKBACK="48h"
 STEP=""
 PAD_BEFORE="60"
 PAD_AFTER="60"
@@ -99,15 +99,26 @@ fi
 END_TS=$(date +%s)
 START_TS=$((END_TS - delta))
 
-# Adaptive step: keep total query points under 10000.
+# Parse STEP (adaptive if not provided).
+MAX_POINTS=10000
 if [[ -z "$STEP" ]]; then
-  # Prometheus expects integer seconds.
-  STEP="$(( delta / 10000 ))s"
-  # Minimum 1s, maximum 3600s (1h) for very long lookbacks.
+  # Default to 10s for fine spike detection, then chunk to stay within MAX_POINTS.
+  STEP="10s"
+  STEP_VAL=10
+  # If lookback is tiny, step can't exceed the full range.
+  if (( STEP_VAL > delta )); then STEP="${delta}s"; STEP_VAL=$delta; fi
+else
   STEP_VAL=$(echo "$STEP" | sed 's/s$//')
-  if (( STEP_VAL < 1 )); then STEP="1s"; fi
-  if (( STEP_VAL > 3600 )); then STEP="3600s"; fi
 fi
+
+# Chunk the query if total points would exceed MAX_POINTS.
+CHUNK_DURATION=$(( STEP_VAL * MAX_POINTS ))
+if (( delta > CHUNK_DURATION )); then
+  CHUNKS=$(( (delta + CHUNK_DURATION - 1) / CHUNK_DURATION ))
+else
+  CHUNKS=1
+fi
+
 QUERY="${MATCH_EXPR} > ${THRESHOLD}"
 
 echo "Prometheus: $PROM_URL"
@@ -119,22 +130,39 @@ echo "Query step:  $STEP"
 echo "Time range:  $START_TS -> $END_TS"
 echo "Padding:     -${PAD_BEFORE}s / +${PAD_AFTER}s"
 echo "Merge gap:   ${MERGE_GAP}s"
+echo "Chunks:      $CHUNKS"
 echo
 
-RESP=$(curl -fsG "$PROM_URL/api/v1/query_range" \
-  --data-urlencode "query=$QUERY" \
-  --data-urlencode "start=$START_TS" \
-  --data-urlencode "end=$END_TS" \
-  --data-urlencode "step=$STEP")
+SPIKES=()
+for (( c=0; c<CHUNKS; c++ )); do
+  c_start=$(( START_TS + c * CHUNK_DURATION ))
+  c_end=$(( START_TS + (c + 1) * CHUNK_DURATION ))
+  if (( c_end > END_TS )); then
+    c_end=$END_TS
+  fi
+  echo "Querying chunk $((c+1))/$CHUNKS: $c_start -> $c_end..."
+  RESP=$(curl -fsG --max-time 300 "$PROM_URL/api/v1/query_range" \
+    --data-urlencode "query=$QUERY" \
+    --data-urlencode "start=$c_start" \
+    --data-urlencode "end=$c_end" \
+    --data-urlencode "step=$STEP")
 
-STATUS=$(jq -r '.status' <<<"$RESP")
-if [[ "$STATUS" != "success" ]]; then
-  echo "Prometheus query failed:" >&2
-  echo "$RESP" >&2
-  exit 1
+  STATUS=$(jq -r '.status' <<<"$RESP")
+  if [[ "$STATUS" != "success" ]]; then
+    echo "Prometheus query failed on chunk $((c+1)):" >&2
+    echo "$RESP" >&2
+    exit 1
+  fi
+
+  mapfile -t CHUNK_SPIKES < <(jq -r '.data.result[]?.values[]?[0]' <<<"$RESP" | sort -n | uniq)
+  if [[ ${#CHUNK_SPIKES[@]} -gt 0 ]]; then
+    SPIKES+=("${CHUNK_SPIKES[@]}")
+  fi
+done
+
+if [[ ${#SPIKES[@]} -gt 0 ]]; then
+  mapfile -t SPIKES < <(printf '%s\n' "${SPIKES[@]}" | sort -n | uniq)
 fi
-
-mapfile -t SPIKES < <(jq -r '.data.result[]?.values[]?[0]' <<<"$RESP" | sort -n | uniq)
 
 if [[ ${#SPIKES[@]} -eq 0 ]]; then
   echo "No spikes found above threshold."
