@@ -12,6 +12,10 @@ PAD_AFTER="60"
 MERGE_GAP="90"
 DRY_RUN="1"
 CLEAN_TOMBSTONES="1"
+INFLUX_URL="http://localhost:8086"
+INFLUX_DB="prometheus"
+CLEAN_INFLUX="1"
+
 
 usage() {
   cat <<'USAGE'
@@ -22,7 +26,7 @@ Defaults:
   --prom-url     http://localhost:9090
   --metric       pigate_radiation_cpm
   --match-expr   pigate_radiation_cpm{instance="pigate:9100",job="node_exporters"}
-  --threshold    1000
+  --threshold    500
   --lookback     24h
   --step         adaptive (delta / 10000, min 1s, max 3600s)
   --pad-before   60
@@ -42,6 +46,7 @@ Options:
   --merge-gap SEC
   --apply        Actually delete data
   --no-clean     Skip clean_tombstones
+  --no-clean-influx  Skip InfluxDB deletion
   -h, --help     Show this help
 
 Examples:
@@ -64,6 +69,7 @@ while [[ $# -gt 0 ]]; do
     --merge-gap) MERGE_GAP="$2"; shift 2 ;;
     --apply) DRY_RUN="0"; shift ;;
     --no-clean) CLEAN_TOMBSTONES="0"; shift ;;
+    --no-clean-influx) CLEAN_INFLUX="0"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -213,7 +219,19 @@ for w in "${windows[@]}"; do
   curl -fsS -X POST -g \
     "$PROM_URL/api/v1/admin/tsdb/delete_series?match[]=$MATCH_EXPR&start=$s&end=$e"
   echo
- done
+
+  # Also delete from InfluxDB (remote_read would pull it back)
+  if [[ "$CLEAN_INFLUX" == "1" ]]; then
+    s_iso=$(date -u -d "@$s" '+%Y-%m-%dT%H:%M:%SZ')
+    e_iso=$(date -u -d "@$e" '+%Y-%m-%dT%H:%M:%SZ')
+    echo "  InfluxDB: deleting $METRIC from $s_iso to $e_iso"
+    RES=$(curl -sG "$INFLUX_URL/query?db=$INFLUX_DB" \
+      --data-urlencode "q=DELETE FROM ${METRIC} WHERE time >= '${s_iso}' AND time <= '${e_iso}'")
+    if echo "$RES" | grep -q 'error'; then
+      echo "  InfluxDB delete failed: $RES" >&2
+    fi
+  fi
+done
 
 if [[ "$CLEAN_TOMBSTONES" == "1" ]]; then
   echo "Cleaning tombstones..."
