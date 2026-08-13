@@ -36,6 +36,10 @@ SOLAR_EXCESS_TARGET_FAHRENHEIT = 68.0
 SOLAR_RESTORE_HOUR = 16
 HEATCOOL_SOLAR_RANGE_FAHRENHEIT = (65.0, 68.0)
 VALID_HVAC_MODES = {"HEAT", "COOL", "HEATCOOL", "OFF"}
+VALID_FAN_TIMER_MODES = {"ON", "OFF"}
+NIGHT_FAN_START_HOUR = 1
+NIGHT_FAN_END_HOUR = 7
+NIGHT_FAN_POLL_SECONDS = 60
 
 
 def _configure_logging(log_to_file: bool = False) -> None:
@@ -127,6 +131,10 @@ def _initial_state() -> Dict[str, Any]:
             # Keep current fail-safe behavior: assume on-grid at startup.
             "on_grid": True,
             "soe": None,
+        },
+        "night_fan": {
+            "active": False,
+            "last_set_at": None,
         },
     }
 
@@ -324,6 +332,39 @@ def set_thermostat_mode(hvac_mode: str = "OFF") -> None:
     )
 
 
+def set_thermostat_fan(timer_mode: str = "OFF", duration_seconds: Optional[int] = None) -> None:
+    """Set thermostat fan timer mode.
+
+    Args:
+        timer_mode: One of `ON`, `OFF`.
+        duration_seconds: Optional fan-on duration in seconds. Included only when
+            `timer_mode` is `ON`.
+
+    Raises:
+        ValueError: If timer mode is invalid.
+        requests.RequestException: If SDM API request fails.
+    """
+    if timer_mode not in VALID_FAN_TIMER_MODES:
+        raise ValueError(
+            f"Invalid timer_mode '{timer_mode}', expected one of {sorted(VALID_FAN_TIMER_MODES)}"
+        )
+
+    params: Dict[str, Any] = {"timerMode": timer_mode}
+    if timer_mode == "ON" and duration_seconds is not None:
+        params["duration"] = f"{int(duration_seconds)}s"
+
+    access_token = get_access_token()
+    _request_json(
+        "POST",
+        f"{GOOGLE_SDM_BASE_URL}/{_device_name()}:executeCommand",
+        headers=_sdm_headers(access_token),
+        json_payload={
+            "command": "sdm.devices.commands.ThermostatFan.SetTimer",
+            "params": params,
+        },
+    )
+
+
 def set_thermostat_eco(eco_on: bool = False) -> None:
     """Set thermostat ECO mode.
 
@@ -361,6 +402,31 @@ def _is_before_solar_cutoff(now: float) -> bool:
 def _is_after_solar_cutoff(now: float) -> bool:
     """Return True when local time is at or after the configured solar cutoff hour."""
     return not _is_before_solar_cutoff(now)
+
+
+def _is_night_fan_window(now: float) -> bool:
+    """Return True when local time is in the configured night-fan window."""
+    hour = time.localtime(now).tm_hour
+    return NIGHT_FAN_START_HOUR <= hour < NIGHT_FAN_END_HOUR
+
+
+def _seconds_until_night_fan_end(now: float) -> int:
+    """Return remaining seconds until the night-fan window ends."""
+    local = time.localtime(now)
+    end = time.mktime(
+        (
+            local.tm_year,
+            local.tm_mon,
+            local.tm_mday,
+            NIGHT_FAN_END_HOUR,
+            0,
+            0,
+            local.tm_wday,
+            local.tm_yday,
+            local.tm_isdst,
+        )
+    )
+    return max(int(end - now), 1)
 
 
 def _solar_override_targets(mode: str) -> Tuple[Optional[float], Optional[float]]:
@@ -792,6 +858,64 @@ def read_thermostat_status() -> None:
         shutdown_event.wait(THERMOSTAT_POLL_SECONDS)
 
 
+def process_night_fan_state(now: Optional[float] = None) -> None:
+    """Turn the HVAC fan on during the night window and off outside it."""
+    if now is None:
+        now = time.time()
+
+    with lock:
+        already_on = ghome["night_fan"]["active"]
+        is_thermostat_off = ghome["is_thermostat_off"]
+        on_grid = ghome["powerwall"]["on_grid"]
+
+    in_window = _is_night_fan_window(now)
+
+    if (not on_grid or is_thermostat_off) and already_on:
+        try:
+            set_thermostat_fan("OFF")
+        except Exception as exc:
+            logging.error("Failed to stop night fan during outage: %s", exc)
+        else:
+            with lock:
+                ghome["night_fan"]["active"] = False
+                ghome["night_fan"]["last_set_at"] = None
+        return
+
+    if in_window and not already_on and on_grid and not is_thermostat_off:
+        duration_seconds = _seconds_until_night_fan_end(now)
+        try:
+            set_thermostat_fan("ON", duration_seconds=duration_seconds)
+        except Exception as exc:
+            logging.error("Failed to start night fan: %s", exc)
+        else:
+            with lock:
+                ghome["night_fan"]["active"] = True
+                ghome["night_fan"]["last_set_at"] = now
+            logging.info("Night HVAC fan ON (1am-7am window).")
+        return
+
+    if not in_window and already_on:
+        try:
+            set_thermostat_fan("OFF")
+        except Exception as exc:
+            logging.error("Failed to stop night fan: %s", exc)
+        else:
+            with lock:
+                ghome["night_fan"]["active"] = False
+                ghome["night_fan"]["last_set_at"] = None
+            logging.info("Night HVAC fan OFF (outside 1am-7am window).")
+
+
+def read_night_fan_status() -> None:
+    """Drive night HVAC fan control on a fixed polling interval."""
+    while not shutdown_event.is_set():
+        try:
+            process_night_fan_state()
+        except Exception:
+            logging.exception("Unhandled error in night-fan worker loop.")
+        shutdown_event.wait(NIGHT_FAN_POLL_SECONDS)
+
+
 def run_service() -> None:
     """Start worker threads and exit if any worker dies.
 
@@ -814,21 +938,33 @@ def run_service() -> None:
         name="Thermostat Status Update",
         daemon=True,
     )
+    night_fan_worker = threading.Thread(
+        target=read_night_fan_status,
+        name="Night HVAC Fan",
+        daemon=True,
+    )
     powerwall_worker.start()
     thermostat_worker.start()
+    night_fan_worker.start()
 
     while not shutdown_event.is_set():
-        if not powerwall_worker.is_alive() or not thermostat_worker.is_alive():
+        if (
+            not powerwall_worker.is_alive()
+            or not thermostat_worker.is_alive()
+            or not night_fan_worker.is_alive()
+        ):
             logging.critical(
-                "Worker thread died (powerwall_alive=%s, thermostat_alive=%s); exiting for systemd restart.",
+                "Worker thread died (powerwall_alive=%s, thermostat_alive=%s, night_fan_alive=%s); exiting for systemd restart.",
                 powerwall_worker.is_alive(),
                 thermostat_worker.is_alive(),
+                night_fan_worker.is_alive(),
             )
             raise SystemExit(1)
         shutdown_event.wait(1)
 
     powerwall_worker.join(timeout=5)
     thermostat_worker.join(timeout=5)
+    night_fan_worker.join(timeout=5)
 
 
 if __name__ == "__main__":

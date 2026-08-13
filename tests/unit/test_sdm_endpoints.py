@@ -80,3 +80,59 @@ def test_set_thermostat_setpoint_rejects_invalid_range():
     """HEATCOOL range commands should require cool > heat."""
     with pytest.raises(ValueError, match="cool_celsius to be greater"):
         automate_home.set_thermostat_setpoint("HEATCOOL", heat_celsius=21.0, cool_celsius=21.0)
+
+
+def test_set_thermostat_fan_on_includes_duration(monkeypatch):
+    """Fan ON should send SetTimer with ISO-8601 duration."""
+    monkeypatch.setattr(automate_home, "PROJECT_ID", "123456789")
+    monkeypatch.setattr(automate_home, "DEVICE_ID", "device-123")
+    monkeypatch.setattr(automate_home, "get_access_token", lambda: "token")
+
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = kwargs["json_payload"]
+        return {}
+
+    monkeypatch.setattr(automate_home, "_request_json", fake_request)
+    automate_home.set_thermostat_fan("ON", duration_seconds=14400)
+
+    assert captured["method"] == "POST"
+    assert (
+        captured["url"]
+        == "https://smartdevicemanagement.googleapis.com/v1/enterprises/123456789/devices/device-123:executeCommand"
+    )
+    assert captured["payload"] == {
+        "command": "sdm.devices.commands.ThermostatFan.SetTimer",
+        "params": {"timerMode": "ON", "duration": "14400s"},
+    }
+
+
+def test_set_thermostat_fan_off_omits_duration(monkeypatch):
+    """Fan OFF should send SetTimer without a duration."""
+    monkeypatch.setattr(automate_home, "PROJECT_ID", "123456789")
+    monkeypatch.setattr(automate_home, "DEVICE_ID", "device-123")
+    monkeypatch.setattr(automate_home, "get_access_token", lambda: "token")
+
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured["payload"] = kwargs["json_payload"]
+        return {}
+
+    monkeypatch.setattr(automate_home, "_request_json", fake_request)
+    automate_home.set_thermostat_fan("OFF")
+
+    assert captured["payload"] == {
+        "command": "sdm.devices.commands.ThermostatFan.SetTimer",
+        "params": {"timerMode": "OFF"},
+    }
+
+
+def test_set_thermostat_fan_rejects_invalid_mode():
+    """Invalid fan timer mode values should raise ValueError explicitly."""
+    with pytest.raises(ValueError, match="Invalid timer_mode"):
+        automate_home.set_thermostat_fan("BADMODE")
+
