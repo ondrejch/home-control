@@ -39,6 +39,7 @@ VALID_HVAC_MODES = {"HEAT", "COOL", "HEATCOOL", "OFF"}
 VALID_FAN_TIMER_MODES = {"ON", "OFF"}
 NIGHT_FAN_START_HOUR = 1
 NIGHT_FAN_END_HOUR = 7
+NIGHT_FAN_ON_SECONDS = 15 * 60
 NIGHT_FAN_POLL_SECONDS = 60
 
 
@@ -410,23 +411,33 @@ def _is_night_fan_window(now: float) -> bool:
     return NIGHT_FAN_START_HOUR <= hour < NIGHT_FAN_END_HOUR
 
 
-def _seconds_until_night_fan_end(now: float) -> int:
-    """Return remaining seconds until the night-fan window ends."""
+def _night_fan_slot_id(now: float) -> Tuple[int, int, int]:
+    """Return a unique id for the current local hour's night-fan slot."""
     local = time.localtime(now)
-    end = time.mktime(
-        (
-            local.tm_year,
-            local.tm_mon,
-            local.tm_mday,
-            NIGHT_FAN_END_HOUR,
-            0,
-            0,
-            local.tm_wday,
-            local.tm_yday,
-            local.tm_isdst,
-        )
-    )
-    return max(int(end - now), 1)
+    return (local.tm_year, local.tm_yday, local.tm_hour)
+
+
+def _night_fan_seconds_into_hour(now: float) -> int:
+    """Return elapsed seconds since the start of the current local hour."""
+    local = time.localtime(now)
+    return local.tm_min * 60 + local.tm_sec
+
+
+def _is_night_fan_on_slot(now: float) -> bool:
+    """Return True during the first 15 minutes of each hour in the night window."""
+    return _is_night_fan_window(now) and _night_fan_seconds_into_hour(now) < NIGHT_FAN_ON_SECONDS
+
+
+def _same_night_fan_slot(last_set_at: Optional[float], now: float) -> bool:
+    """Return True when `last_set_at` is in the same local hour as `now`."""
+    if last_set_at is None:
+        return False
+    return _night_fan_slot_id(last_set_at) == _night_fan_slot_id(now)
+
+
+def _seconds_until_night_fan_slot_end(now: float) -> int:
+    """Return remaining seconds in the current 15-minute on slot."""
+    return max(NIGHT_FAN_ON_SECONDS - _night_fan_seconds_into_hour(now), 1)
 
 
 def _solar_override_targets(mode: str) -> Tuple[Optional[float], Optional[float]]:
@@ -859,18 +870,21 @@ def read_thermostat_status() -> None:
 
 
 def process_night_fan_state(now: Optional[float] = None) -> None:
-    """Turn the HVAC fan on during the night window and off outside it."""
+    """Run the HVAC fan for 15 minutes at the start of each hour from 1am to 7am."""
     if now is None:
         now = time.time()
 
     with lock:
         already_on = ghome["night_fan"]["active"]
+        last_set_at = ghome["night_fan"]["last_set_at"]
         is_thermostat_off = ghome["is_thermostat_off"]
         on_grid = ghome["powerwall"]["on_grid"]
 
-    in_window = _is_night_fan_window(now)
+    in_on_slot = _is_night_fan_on_slot(now)
+    same_slot = _same_night_fan_slot(last_set_at, now)
+    outage = not on_grid or is_thermostat_off
 
-    if (not on_grid or is_thermostat_off) and already_on:
+    if outage and already_on:
         try:
             set_thermostat_fan("OFF")
         except Exception as exc:
@@ -881,8 +895,8 @@ def process_night_fan_state(now: Optional[float] = None) -> None:
                 ghome["night_fan"]["last_set_at"] = None
         return
 
-    if in_window and not already_on and on_grid and not is_thermostat_off:
-        duration_seconds = _seconds_until_night_fan_end(now)
+    if in_on_slot and not outage and not same_slot:
+        duration_seconds = _seconds_until_night_fan_slot_end(now)
         try:
             set_thermostat_fan("ON", duration_seconds=duration_seconds)
         except Exception as exc:
@@ -891,10 +905,10 @@ def process_night_fan_state(now: Optional[float] = None) -> None:
             with lock:
                 ghome["night_fan"]["active"] = True
                 ghome["night_fan"]["last_set_at"] = now
-            logging.info("Night HVAC fan ON (1am-7am window).")
+            logging.info("Night HVAC fan ON (15 minutes each hour, 1am-7am).")
         return
 
-    if not in_window and already_on:
+    if already_on and not in_on_slot:
         try:
             set_thermostat_fan("OFF")
         except Exception as exc:
@@ -903,7 +917,7 @@ def process_night_fan_state(now: Optional[float] = None) -> None:
             with lock:
                 ghome["night_fan"]["active"] = False
                 ghome["night_fan"]["last_set_at"] = None
-            logging.info("Night HVAC fan OFF (outside 1am-7am window).")
+            logging.info("Night HVAC fan OFF (outside 15-minute hourly slot).")
 
 
 def read_night_fan_status() -> None:
