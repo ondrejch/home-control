@@ -360,7 +360,7 @@ def set_thermostat_fan(timer_mode: str = "OFF", duration_seconds: Optional[int] 
         f"{GOOGLE_SDM_BASE_URL}/{_device_name()}:executeCommand",
         headers=_sdm_headers(access_token),
         json_payload={
-            "command": "sdm.devices.commands.ThermostatFan.SetTimer",
+            "command": "sdm.devices.commands.Fan.SetTimer",
             "params": params,
         },
     )
@@ -438,6 +438,14 @@ def _same_night_fan_slot(last_set_at: Optional[float], now: float) -> bool:
 def _seconds_until_night_fan_slot_end(now: float) -> int:
     """Return remaining seconds in the current 15-minute on slot."""
     return max(NIGHT_FAN_ON_SECONDS - _night_fan_seconds_into_hour(now), 1)
+
+
+def _http_error_detail(exc: Exception) -> str:
+    """Describe a requests error, including the API response body when present."""
+    response = getattr(exc, "response", None)
+    if response is not None and response.text:
+        return f"{exc}: {response.text[:500]}"
+    return str(exc)
 
 
 def _solar_override_targets(mode: str) -> Tuple[Optional[float], Optional[float]]:
@@ -888,7 +896,7 @@ def process_night_fan_state(now: Optional[float] = None) -> None:
         try:
             set_thermostat_fan("OFF")
         except Exception as exc:
-            logging.error("Failed to stop night fan during outage: %s", exc)
+            logging.error("Failed to stop night fan during outage: %s", _http_error_detail(exc))
         else:
             with lock:
                 ghome["night_fan"]["active"] = False
@@ -900,7 +908,7 @@ def process_night_fan_state(now: Optional[float] = None) -> None:
         try:
             set_thermostat_fan("ON", duration_seconds=duration_seconds)
         except Exception as exc:
-            logging.error("Failed to start night fan: %s", exc)
+            logging.error("Failed to start night fan: %s", _http_error_detail(exc))
         else:
             with lock:
                 ghome["night_fan"]["active"] = True
@@ -912,7 +920,7 @@ def process_night_fan_state(now: Optional[float] = None) -> None:
         try:
             set_thermostat_fan("OFF")
         except Exception as exc:
-            logging.error("Failed to stop night fan: %s", exc)
+            logging.error("Failed to stop night fan: %s", _http_error_detail(exc))
         else:
             with lock:
                 ghome["night_fan"]["active"] = False

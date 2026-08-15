@@ -105,7 +105,7 @@ def test_set_thermostat_fan_on_includes_duration(monkeypatch):
         == "https://smartdevicemanagement.googleapis.com/v1/enterprises/123456789/devices/device-123:executeCommand"
     )
     assert captured["payload"] == {
-        "command": "sdm.devices.commands.ThermostatFan.SetTimer",
+        "command": "sdm.devices.commands.Fan.SetTimer",
         "params": {"timerMode": "ON", "duration": "14400s"},
     }
 
@@ -126,7 +126,7 @@ def test_set_thermostat_fan_off_omits_duration(monkeypatch):
     automate_home.set_thermostat_fan("OFF")
 
     assert captured["payload"] == {
-        "command": "sdm.devices.commands.ThermostatFan.SetTimer",
+        "command": "sdm.devices.commands.Fan.SetTimer",
         "params": {"timerMode": "OFF"},
     }
 
